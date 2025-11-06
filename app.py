@@ -1,5 +1,19 @@
+# app.py — Bidirectional Tutor (Arabic ↔ English) with sharper feedback + instructor/student mode
+
+Below is a **single, ready-to-run** `app.py` that includes:
+
+* Arabic ↔ English directions
+* Stronger LLM feedback (span-level issues, severity, multiple scores)
+* Verifier pass (entities, numbers, dates, negation)
+* Rate‑limit‑safe grammar checks + fallback
+* Sidebar rubric weights + overall metric
+* Optional Instructor → Student flow (Supabase). If not configured, the app still runs for ad‑hoc texts.
+
+---
+
+```python
 # Bidirectional Translation Tutor: Arabic ↔ English
-# Heuristics for negation transfer, article use, false friends, prepositions, and synonym nudges.
+# Strong feedback (span-level), verifier pass, rubric weights, optional instructor/student flow.
 
 import os
 import io
@@ -26,7 +40,19 @@ except LookupError:
     nltk.download("wordnet")
     nltk.download("omw-1.4")
 
-st.set_page_config(page_title="Arabic ↔ English Translation Tutor", page_icon="🗣️", layout="centered")
+# Optional DB
+try:
+    from supabase import create_client  # type: ignore
+except Exception:
+    create_client = None
+
+# Risk checks
+try:
+    import dateutil.parser as du
+except Exception:
+    du = None
+
+st.set_page_config(page_title="Arabic ↔ English Translation Tutor", page_icon="🗣️", layout="wide")
 
 # =============================
 # Arabic helpers & resources
@@ -37,14 +63,12 @@ EN_NEG_TOKENS = {" not ", "n't", " never ", " no "}
 DIACRITICS = re.compile("[\u0617-\u061A\u064B-\u0652\u0657-\u065F\u0670\u06D6-\u06ED]")
 TATWEEL = "\u0640"
 
-# False friends (triggered when certain English words appear with an Arabic source cue, or vice versa)
 FALSE_FRIENDS_AR_EN = {
-    "فعليًا": ("actually", "Use ‘actually’ for emphasis/contrast, not for ‘currently’. For ‘currently’, use ‘currently/at the moment’."),
-    "حساس": ("sensitive", "‘Sensitive’ is not ‘sensible’. ‘Sensible’ = reasonable; ‘sensitive’ = easily affected."),
-    "أخيرا": ("finally", "Use ‘finally’ for end of a process, not for ‘eventually’. ‘Eventually’ = at some point in the future."),
+    "فعليًا": ("actually", "Use 'actually' for emphasis/contrast, not for 'currently'. For 'currently', use 'currently/at the moment'."),
+    "حساس": ("sensitive", "'Sensitive' ≠ 'sensible'. 'Sensible' = reasonable; 'sensitive' = easily affected."),
+    "أخيرا": ("finally", "Use 'finally' for the end of a process, not for 'eventually' (at some point in the future)."),
 }
 
-# Curated English synonyms for overused words
 OVERUSED_ENGLISH = {
     "good": ["strong", "effective", "solid", "helpful", "beneficial", "favorable"],
     "very": ["extremely", "highly", "particularly", "remarkably"],
@@ -55,7 +79,6 @@ OVERUSED_ENGLISH = {
     "do": ["perform", "carry out", "conduct", "execute"],
 }
 
-# Curated Arabic synonyms to reduce repetition
 OVERUSED_ARABIC = {
     "جيد": ["ممتاز", "قوي", "فعّال", "مفيد", "ملائم"],
     "كبير": ["ضخم", "واسع", "بارز", "هائل", "ملحوظ"],
@@ -73,27 +96,15 @@ PREP_TIPS_EN = [
 
 PREP_TIPS_AR = [
     ("في", "تُستخدم مع الزمن العام/الأماكن الواسعة: في 2020، في يوليو، في المدينة"),
-    ("على", "تُستخدم مع الأيام/الأسطح: على الطاولة، على الجدار (انتبه: ‘on Monday’ → ‘يوم الاثنين’)"),
+    ("على", "تُستخدم مع الأسطح/بعض التراكيب؛ ملاحظة: 'on Monday' → 'يوم الاثنين'"),
     ("عند", "تُستخدم مع الأوقات/النقاط المحددة: عند الساعة السابعة، عند الباب"),
 ]
-
-def ar_normalize(s: str) -> str:
-    s = DIACRITICS.sub("", s or "")
-    s = s.replace(TATWEEL, "")
-    s = re.sub("[\u0622\u0623\u0625]", "ا", s)  # unify alef forms
-    s = s.replace("ى", "ي").replace("ئ", "ي")
-    return s
 
 # =============================
 # LanguageTool setup (rate-limit safe)
 # =============================
 
 def get_lt_tool(lang_code: str = "en-US"):
-    """
-    Prefer the hosted Public API (works on Streamlit Cloud).
-    If LT_API_URL and/or LT_API_KEY are provided via secrets/env, use them.
-    Falls back to default public endpoint, then local server.
-    """
     api_url = st.secrets.get("LT_API_URL", os.getenv("LT_API_URL"))
     api_key = st.secrets.get("LT_API_KEY", os.getenv("LT_API_KEY"))
     try:
@@ -109,8 +120,7 @@ def safe_lt_check(text: str, lang_code: str = "en-US") -> List[Any]:
     try:
         return tool.check(text)
     except Exception:
-        # Common: rate limit/timeouts → return empty and let fallback kick in
-        st.warning("Grammar server is busy (rate limit). Using lightweight checks for now.")
+        st.warning("Grammar server is busy (rate limit). Using lightweight checks this run.")
         return []
 
 # =============================
@@ -147,12 +157,26 @@ def fallback_text_checks_en(text: str) -> List[Dict[str, Any]]:
     return issues
 
 # =============================
+# Utility
+# =============================
+
+def ar_normalize(s: str) -> str:
+    s = DIACRITICS.sub("", s or "")
+    s = s.replace(TATWEEL, "")
+    s = re.sub("[\u0622\u0623\u0625]", "ا", s)
+    s = s.replace("ى", "ي").replace("ئ", "ي")
+    return s
+
+# =============================
 # OpenAI helpers (optional)
 # =============================
 
 def has_openai() -> bool:
     key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     return bool(key)
+
+def _model_name():
+    return os.getenv("OPENAI_MODEL", "gpt-4o")
 
 def init_openai():
     if not has_openai():
@@ -193,8 +217,7 @@ def wordnet_synonyms_en(word: str) -> List[str]:
             w = lemma.name().replace("_", " ")
             if w.lower() != word.lower():
                 syns.add(w)
-    out = sorted(list(syns))
-    return out[:10]
+    return sorted(list(syns))[:10]
 
 # =============================
 # Heuristics: Arabic → English
@@ -205,27 +228,22 @@ def heuristics_ar_to_en(ar_source: str, en_student: str) -> Tuple[List[str], Dic
     ar_norm = ar_normalize(ar_source)
     en_low = (en_student or "").lower()
 
-    # Negation transfer
     if any(tok in ar_norm for tok in AR_NEGATIONS):
         if not any(tok in en_low for tok in EN_NEG_TOKENS) and not en_low.startswith("no "):
-            notes.append("Source has negation; ensure the English includes ‘not/never/no’.")
+            notes.append("Source has negation; ensure the English includes 'not/never/no'.")
 
-    # Definite article heuristic: Arabic definite ‘ال’ often maps to ‘the’
     if re.search(r"\bال\w+", ar_norm) and re.search(r"\b(the)\b", en_low) is None:
-        notes.append("Arabic definite ‘ال’ may require ‘the’ in English; check article use.")
+        notes.append("Arabic definite 'ال' may require 'the' in English; check article use.")
 
-    # Preposition reminders
     for p, tip in PREP_TIPS_EN:
         if re.search(fr"\b{p}\b", en_low):
-            notes.append(f"Preposition ‘{p}’: {tip}")
+            notes.append(f"Preposition '{p}': {tip}")
             break
 
-    # False friends
     for ar_key, (ff, msg) in FALSE_FRIENDS_AR_EN.items():
         if ar_key in ar_norm and re.search(fr"\b{ff}\b", en_low):
-            notes.append(f"Possible false friend: ‘{ff}’. {msg}")
+            notes.append(f"Possible false friend: '{ff}'. {msg}")
 
-    # Overuse → synonyms
     synonym_suggestions: Dict[str, List[str]] = {}
     tokens = re.findall(r"[a-zA-Z']+", en_student or "")
     counts = {}
@@ -246,31 +264,26 @@ def heuristics_ar_to_en(ar_source: str, en_student: str) -> Tuple[List[str], Dic
 
 def heuristics_en_to_ar(en_source: str, ar_student: str) -> Tuple[List[str], Dict[str, List[str]]]:
     notes: List[str] = []
-    en_low = f" { (en_source or '').lower() } "
+    en_low = f" {(en_source or '').lower()} "
     ar_norm = ar_normalize(ar_student or "")
 
-    # Negation transfer: English not/never/no → Arabic negation
     if any(tok in en_low for tok in EN_NEG_TOKENS) and not any(tok in ar_norm for tok in AR_NEGATIONS):
         notes.append("Source is negative; add Arabic negation (لا/لم/لن/ما/ليس) where appropriate.")
 
-    # Definite article: English "the" → Arabic definite "ال"
     if " the " in en_low and not re.search(r"\bال\w+", ar_norm):
-        notes.append("Source uses ‘the’; consider the Arabic definite article ‘ال’ when needed.")
+        notes.append("Source uses 'the'; consider the Arabic definite article 'ال' when needed.")
 
-    # Prepositions: quick reminders
     for p, tip in PREP_TIPS_AR:
-        if p in ar_student:
-            notes.append(f"تلميح حرف الجر ‘{p}’: {tip}")
+        if p in (ar_student or ""):
+            notes.append(f"تلميح حرف الجر '{p}': {tip}")
             break
 
-    # Numbers & named entities: encourage faithful transfer
     if re.search(r"\d", en_source or "") and not re.search(r"\d", ar_student or ""):
         notes.append("تأكد من نقل الأرقام كما هي (أو بالأرقام العربية إذا لزم).")
-    # Minimal check for transliteration vs. translation of names (very rough)
-    if re.search(r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b", en_source or ""):
-        notes.append("حافظ على الأسماء العلم إمّا منقولة صوتيًا بدقة أو مترجمة إذا لها مقابل شائع.")
 
-    # Overuse → Arabic synonyms
+    if re.search(r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b", en_source or ""):
+        notes.append("حافظ على الأسماء العلم منقولة صوتيًا بدقة أو مترجمة إذا لها مقابل شائع.")
+
     synonym_suggestions: Dict[str, List[str]] = {}
     tokens = re.findall(r"[\u0600-\u06FF]+", ar_student or "")
     counts = {}
@@ -282,119 +295,129 @@ def heuristics_en_to_ar(en_source: str, ar_student: str) -> Tuple[List[str], Dic
     return notes, synonym_suggestions
 
 # =============================
-# LLM-enhanced coaching
+# Quick risk scan (heuristic)
 # =============================
 
+def quick_risk_scan(source: str, student: str) -> Dict[str, Any]:
+    risks = {"numbers": [], "dates": [], "named_entities": [], "negation_flip": False}
+    nums_src = re.findall(r"\d+[\d,\.]*", source or "")
+    nums_tgt = re.findall(r"\d+[\d,\.]*", student or "")
+    for n in nums_src:
+        if n not in nums_tgt:
+            risks["numbers"].append(n)
+    if du:
+        for m in re.findall(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}|\d{1,2}\s+\w+\s+\d{4}", source or ""):
+            try:
+                du.parse(m)
+                if m not in (student or ""):
+                    risks["dates"].append(m)
+            except Exception:
+                pass
+    for name in re.findall(r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b", source or ""):
+        if name not in (student or ""):
+            risks["named_entities"].append(name)
+    src_neg = bool(re.search(r"\bnot\b|n't|never|no\b", (source or "").lower()) or re.search(r"لا|لم|لن|ما|ليس", source or ""))
+    tgt_neg = bool(re.search(r"\bnot\b|n't|never|no\b", (student or "").lower()) or re.search(r"لا|لم|لن|ما|ليس", student or ""))
+    risks["negation_flip"] = src_neg != tgt_neg
+    return risks
+
+# =============================
+# LLM-enhanced coaching (primary + verifier)
+# =============================
+
+SCHEMA_HINT = {
+  "corrected": "string",
+  "alt_rewrites": ["string"],
+  "scores": {"fluency": 0, "adequacy": 0, "fidelity": 0, "style": 0, "overall": 0},
+  "issues": [
+    {"start": 0, "end": 0, "text": "", "type": "", "severity": "", "explanation": "", "suggestion": ""}
+  ],
+  "risk_flags": {"named_entities": [], "numbers": [], "dates": [], "negation_flip": False, "hallucination": False},
+  "spoken_feedback_en": "",
+  "spoken_feedback_ar": ""
+}
+
+VERIFY_SYSTEM = (
+    "You are a strict verifier for translation feedback. Given source, student, and a proposed corrected version, "
+    "identify mismatches in named entities, numbers, dates, and polarity (negation). Respond in JSON."
+)
+
 def llm_feedback(student_text: str, source_text: str, mode: str) -> Dict[str, Any]:
-    """
-    mode: "ar→en" or "en→ar"
-    Returns keys:
-      corrected, explanations[], fluency_score, word_choice_notes[], synonym_suggestions{}, spoken_feedback_en, spoken_feedback_ar
-    """
     data = {
-        "corrected": "",
-        "explanations": [],
-        "fluency_score": 0,
-        "word_choice_notes": [],
-        "synonym_suggestions": {},
+        "corrected": student_text,
+        "alt_rewrites": [],
+        "scores": {"fluency": 70, "adequacy": 70, "fidelity": 70, "style": 70, "overall": 70},
+        "issues": [],
+        "risk_flags": {"named_entities": [], "numbers": [], "dates": [], "negation_flip": False, "hallucination": False},
         "spoken_feedback_en": "",
         "spoken_feedback_ar": "",
     }
 
-    # Baseline grammar/style only when English is the TARGET (we have tooling there)
+    # Heuristics + LT pre-pass
     if mode == "ar→en":
         lt_issues = analyze_with_languagetool_en(student_text)
+        notes, syns = heuristics_ar_to_en(source_text, student_text)
     else:
-        lt_issues = []  # Arabic target: rely on heuristics + LLM
+        lt_issues = []
+        notes, syns = heuristics_en_to_ar(source_text, student_text)
 
     if has_openai():
         client = init_openai()
         if client:
             target_lang = "English" if mode == "ar→en" else "Arabic"
             system_prompt = (
-                f"You are a bilingual Arabic↔English translation tutor. "
-                f"Target language: {target_lang}. "
-                "Compare the student's translation to the source, then return concise, classroom-friendly feedback. "
-                "Return JSON with keys: corrected, explanations[{type,original,suggestion,explanation}], "
-                "fluency_score(0-100), word_choice_notes[], synonym_suggestions{word:[...]}, "
-                "spoken_feedback_en, spoken_feedback_ar."
+                f"You are a meticulous Arabic↔English translation coach. Target language: {target_lang}.\n"
+                "Return precise, span-labeled feedback. Keep corrections minimal (preserve meaning).\n"
+                "JSON only, matching this schema: " + json.dumps(SCHEMA_HINT)
             )
             user_payload = {
                 "direction": mode,
-                "source_text": source_text,
-                "student_translation": student_text,
-                "focus": ["grammar", "syntax", "fluency", "word choice", "faithfulness"],
-                "style": "brief and constructive",
+                "source": source_text,
+                "student": student_text,
+                "requirements": [
+                    "Use char offsets start/end relative to the STUDENT string",
+                    "Classify: grammar|syntax|fluency|word_choice|adequacy|fidelity|register",
+                    "Severity: minor|major|critical",
+                    "Provide corrected + up to 2 alternative rewrites",
+                    "Scores 0-100 for fluency, adequacy, fidelity, style, overall",
+                    "Spoken feedback: brief; one English, one Arabic"
+                ]
             }
             try:
                 if client == "legacy":
                     resp = openai.chat.completions.create(
-                        model="gpt-4o-mini",
-                        temperature=0.3,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
-                        ],
-                        response_format={"type": "json_object"}
+                        model=_model_name(), temperature=0.2,
+                        messages=[{"role":"system","content":system_prompt},{"role":"user","content": json.dumps(user_payload, ensure_ascii=False)}],
+                        response_format={"type":"json_object"}
                     )
-                    raw = resp.choices[0].message.content
+                    parsed = json.loads(resp.choices[0].message.content)
                 else:
                     resp = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        temperature=0.3,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
-                        ],
-                        response_format={"type": "json_object"}
+                        model=_model_name(), temperature=0.2,
+                        messages=[{"role":"system","content":system_prompt},{"role":"user","content": json.dumps(user_payload, ensure_ascii=False)}],
+                        response_format={"type":"json_object"}
                     )
-                    raw = resp.choices[0].message.content
-                parsed = json.loads(raw)
+                    parsed = json.loads(resp.choices[0].message.content)
                 if isinstance(parsed, dict):
-                    data.update(parsed)
+                    for k, v in parsed.items():
+                        data[k] = v
             except Exception as e:
-                st.warning(f"LLM feedback unavailable, using rule-based checks only. ({e})")
+                st.warning(f"LLM feedback temporarily unavailable; kept rule-based. ({e})")
 
-    # Fallback/populate if LLM missing fields
-    if not data.get("corrected"):
-        data["corrected"] = student_text
-        if mode == "ar→en":
-            exps = []
-            for i in lt_issues[:12]:
-                exps.append({
-                    "type": i.get("type", "issue"),
-                    "original": "",
-                    "suggestion": (i.get("replacements") or [""])[0] if isinstance(i.get("replacements"), list) else "",
-                    "explanation": i.get("message", ""),
-                })
-            data["explanations"] = exps
-            data["fluency_score"] = max(0, 100 - len(lt_issues)*3)
-            data["spoken_feedback_en"] = (
-                "Good effort. Watch articles (a/the), tense consistency, and prepositions. "
-                "Try the synonym suggestions to avoid repetition, then read the corrected line aloud."
-            )
-            data["spoken_feedback_ar"] = (
-                "عمل جيد. انتبه لاستخدام أدوات التعريف، واتساق الأزمنة، وحروف الجر. "
-                "جرّب المرادفات المقترحة ثم أعد قراءة الجملة المصححة."
-            )
-        else:  # en→ar
-            data["explanations"] = data.get("explanations", [])
-            data["fluency_score"] = 75  # soft default without Arabic grammar scoring
-            data["spoken_feedback_en"] = (
-                "Nice translation. Check definite articles, negation, and names/numbers. "
-                "Aim for concise, natural Arabic phrasing."
-            )
-            data["spoken_feedback_ar"] = (
-                "ترجمة موفّقة. راجع أدوات التعريف (ال)، ونقل النفي بدقة، والأسماء/الأرقام، "
-                "وحاول صياغة عربية طبيعية ومقتضبة."
-            )
+    # Convert LT issues to span issues
+    for li in (lt_issues or [])[:10]:
+        start = li.get("offset", 0)
+        end = start + li.get("length", 0)
+        data.setdefault("issues", []).append({
+            "start": start, "end": end,
+            "text": student_text[start:end],
+            "type": li.get("type", "grammar"),
+            "severity": "minor",
+            "explanation": li.get("message", ""),
+            "suggestion": (li.get("replacements") or [""])[0] if isinstance(li.get("replacements"), list) else ""
+        })
 
-    # Merge heuristics & synonyms based on direction
-    if mode == "ar→en":
-        notes, syns = heuristics_ar_to_en(source_text, student_text)
-    else:
-        notes, syns = heuristics_en_to_ar(source_text, student_text)
-
+    # Add heuristics notes + synonyms
     if notes:
         data.setdefault("word_choice_notes", [])
         data["word_choice_notes"].extend(notes)
@@ -402,8 +425,44 @@ def llm_feedback(student_text: str, source_text: str, mode: str) -> Dict[str, An
         data.setdefault("synonym_suggestions", {})
         for k, v in syns.items():
             existing = data["synonym_suggestions"].get(k, [])
-            merged = list(dict.fromkeys(existing + v))[:10]
-            data["synonym_suggestions"][k] = merged
+            data["synonym_suggestions"][k] = list(dict.fromkeys(existing + v))[:10]
+
+    # Verifier pass
+    if has_openai() and data.get("corrected"):
+        client = init_openai()
+        payload_v = {"source": source_text, "student": student_text, "corrected": data["corrected"]}
+        try:
+            if client == "legacy":
+                r = openai.chat.completions.create(
+                    model=_model_name(), temperature=0,
+                    messages=[{"role":"system","content":VERIFY_SYSTEM},{"role":"user","content": json.dumps(payload_v, ensure_ascii=False)}],
+                    response_format={"type":"json_object"}
+                )
+                ver = json.loads(r.choices[0].message.content)
+            else:
+                r = client.chat.completions.create(
+                    model=_model_name(), temperature=0,
+                    messages=[{"role":"system","content":VERIFY_SYSTEM},{"role":"user","content": json.dumps(payload_v, ensure_ascii=False)}],
+                    response_format={"type":"json_object"}
+                )
+                ver = json.loads(r.choices[0].message.content)
+            if isinstance(ver, dict):
+                rf = data.get("risk_flags", {})
+                for k in ["named_entities", "numbers", "dates", "negation_flip", "hallucination"]:
+                    if k in ver:
+                        rf[k] = ver[k]
+                data["risk_flags"] = rf
+        except Exception:
+            pass
+
+    # Safety clamps for scores
+    sc = data.setdefault("scores", {})
+    for k in ["fluency", "adequacy", "fidelity", "style", "overall"]:
+        try:
+            s = int(sc.get(k, 70))
+            sc[k] = min(100, max(0, s))
+        except Exception:
+            sc[k] = 70
 
     return data
 
@@ -419,10 +478,33 @@ def tts_bytes(text: str, lang_code: str = "en") -> bytes:
     return fp.read()
 
 # =============================
+# Optional: Supabase client
+# =============================
+
+@st.cache_resource
+def supabase_client():
+    if not create_client:
+        return None
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_SERVICE_ROLE")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+# =============================
 # UI
 # =============================
 
 st.title("🗣️ Arabic ↔ English Translation Tutor")
+
+with st.sidebar:
+    role = st.selectbox("Role", ["Student", "Instructor"], index=0)
+    st.header("Rubric weights")
+    w_flu = st.slider("Fluency weight", 0, 100, 25)
+    w_ade = st.slider("Adequacy weight", 0, 100, 25)
+    w_fid = st.slider("Fidelity weight", 0, 100, 25)
+    w_sty = st.slider("Style weight", 0, 100, 25)
+    minimal = st.toggle("Prefer minimal edits", value=True)
 
 mode = st.radio(
     "Direction",
@@ -431,110 +513,193 @@ mode = st.radio(
     horizontal=True
 )
 
-if mode == "Arabic → English":
-    st.markdown(
-        "Speak or paste your **English** translation. Provide the **Arabic** source.\n\n"
-        "You’ll get corrections on **grammar, syntax, fluency, and word choice**, plus synonym suggestions. "
-        "You can also listen to the feedback (English & Arabic)."
-    )
-    col1, col2 = st.columns(2)
-    with col1:
-        source_text = st.text_area("النصّ العربي (Source in Arabic)", height=180, placeholder="ألصِق النص العربي هنا…")
-    with col2:
-        student_text = st.text_area("Your English translation", height=180, placeholder="Type or paste your English translation…")
-    tts_target_lang = "en"
-    mode_key = "ar→en"
-
-else:
-    st.markdown(
-        "Speak or paste your **Arabic** translation. Provide the **English** source.\n\n"
-        "You’ll get targeted feedback for **natural Arabic phrasing**, faithfulness, and common interference issues."
-    )
-    col1, col2 = st.columns(2)
-    with col1:
-        source_text = st.text_area("Source in English", height=180, placeholder="Paste the English source here…")
-    with col2:
-        student_text = st.text_area("ترجمتك العربية", height=180, placeholder="ألصِق ترجمتك العربية هنا…")
-    tts_target_lang = "ar"
-    mode_key = "en→ar"
-
-st.divider()
-rec = st.audio_input("Optional: Record your translation (mic)")
-
-if st.button("Analyze & Coach"):
-    if not source_text.strip():
-        st.warning("Please paste the source text.")
-        st.stop()
-
-    working_text = (student_text or "").strip()
-    if not working_text and rec is None:
-        st.warning("Paste text or record audio for your translation.")
-        st.stop()
-
-    if rec is not None and not working_text:
-        st.info("Audio provided but STT is not wired in this build. Paste text, or add your OpenAI key and connect Whisper if needed.")
-
-    # Main feedback
-    enriched = llm_feedback(working_text, source_text, mode_key)
-
-    st.subheader("✅ Corrected Version")
-    st.write(enriched.get("corrected", working_text))
-
-    st.subheader(f"🧭 Feedback (Fluency: {enriched.get('fluency_score', 0)}/100)")
-    expander = st.expander("Detailed issues")
-    with expander:
-        exps = enriched.get("explanations", [])
-        if not exps:
-            st.write("No issues found.")
+if role == "Instructor":
+    st.subheader("Create exercise")
+    ex_title = st.text_input("Title")
+    ex_dir = st.radio("Direction", ["ar→en","en→ar"], horizontal=True)
+    ex_source = st.text_area("Source text", height=140)
+    ex_level = st.selectbox("Level", ["B1","B2","C1","C2"], index=1)
+    sb = supabase_client()
+    if st.button("Save exercise"):
+        if not sb:
+            st.error("Supabase is not configured.")
+        elif not (ex_title and ex_source):
+            st.warning("Title and source are required.")
         else:
-            for i, e in enumerate(exps, 1):
-                st.markdown(f"**{i}. {e.get('type','issue')}** — {e.get('explanation','')}")
-                if e.get("original"): st.markdown(f"- Original: `{e['original']}`")
-                if e.get("suggestion"): st.markdown(f"- Suggestion: `{e['suggestion']}`")
+            sb.table("exercises").insert({
+                "title": ex_title, "direction": ex_dir, "source": ex_source, "level": ex_level
+            }).execute()
+            st.success("Exercise saved.")
+    st.divider()
+    if sb:
+        st.subheader("Existing exercises")
+        rows = sb.table("exercises").select("id,title,direction,level,created_at").order("created_at", desc=True).execute().data
+        for r in rows:
+            st.write(f"• {r['title']} ({r['direction']}, {r['level']}) — {r['id']}")
 
-    wc = enriched.get("word_choice_notes", [])
-    if wc:
-        st.subheader("🎯 Notes & Strategy")
-        for note in wc:
-            st.write(f"- {note}")
+# Student / ad‑hoc panel
+if role == "Student":
+    sb = supabase_client()
+    chosen = None
+    if sb:
+        st.subheader("Pick an exercise (optional)")
+        rows = sb.table("exercises").select("id,title,direction,source").order("created_at", desc=True).execute().data
+        if rows:
+            idx = st.selectbox("Exercise", [-1] + list(range(len(rows))), format_func=lambda k: "None (use custom text)" if k == -1 else f"{rows[k]['title']} — {rows[k]['direction']}")
+            if idx != -1:
+                chosen = rows[idx]
 
-    syns = enriched.get("synonym_suggestions", {})
-    if syns:
-        st.subheader("🧩 Synonym Suggestions")
-        # For readability, show English terms bolded in ar→en, Arabic terms bolded in en→ar
-        for w, options in syns.items():
-            st.markdown(f"- **{w}** → {', '.join(options)}")
+    if mode == "Arabic → English" or (chosen and chosen["direction"] == "ar→en"):
+        st.markdown("Provide **Arabic** source and your **English** translation.")
+        col1, col2 = st.columns(2)
+        with col1:
+            source_text = st.text_area("النصّ العربي (Source in Arabic)", height=180, value=(chosen["source"] if chosen and chosen["direction"]=="ar→en" else ""))
+        with col2:
+            student_text = st.text_area("Your English translation", height=180)
+        tts_target_lang = "en"
+        mode_key = "ar→en"
+    else:
+        st.markdown("Provide **English** source and your **Arabic** translation.")
+        col1, col2 = st.columns(2)
+        with col1:
+            source_text = st.text_area("Source in English", height=180, value=(chosen["source"] if chosen and chosen["direction"]=="en→ar" else ""))
+        with col2:
+            student_text = st.text_area("ترجمتك العربية", height=180)
+        tts_target_lang = "ar"
+        mode_key = "en→ar"
 
-    # Spoken feedback (EN + AR)
-    st.subheader("🔊 Listen to Feedback")
-    fb_en = enriched.get("spoken_feedback_en") or "Good effort. Review the corrections and try again."
-    fb_ar = enriched.get("spoken_feedback_ar") or "عمل جيد. راجع التصحيحات ثم حاول مجدداً."
+    st.divider()
+    if st.button("Analyze & Coach"):
+        if not source_text.strip():
+            st.warning("Please paste the source text.")
+            st.stop()
+        working_text = (student_text or "").strip()
+        if not working_text:
+            st.warning("Paste your translation to analyze.")
+            st.stop()
 
-    try:
-        mp3_main = tts_bytes(enriched.get("corrected", working_text), lang_code=tts_target_lang)
-        st.audio(mp3_main, format="audio/mp3")
-        st.download_button(
-            "Download corrected (target language)",
-            mp3_main,
-            file_name="corrected_target.mp3"
-        )
-    except Exception as e:
-        st.warning(f"TTS failed on corrected text: {e}")
+        enriched = llm_feedback(working_text, source_text, mode_key)
 
-    try:
-        mp3_en = tts_bytes(fb_en, lang_code="en")
-        st.audio(mp3_en, format="audio/mp3")
-        st.download_button("Download feedback (EN)", mp3_en, file_name="feedback_en.mp3")
-    except Exception as e:
-        st.warning(f"English TTS failed: {e}")
+        # Scores & overall
+        sc = enriched.get("scores", {})
+        overall = (
+            sc.get("fluency",0)*w_flu + sc.get("adequacy",0)*w_ade + sc.get("fidelity",0)*w_fid + sc.get("style",0)*w_sty
+        ) / max(1, (w_flu+w_ade+w_fid+w_sty))
+        st.metric("Overall score", f"{overall:.0f}/100")
 
-    try:
-        mp3_ar = tts_bytes(fb_ar, lang_code="ar")
-        st.audio(mp3_ar, format="audio/mp3")
-        st.download_button("Download feedback (AR)", mp3_ar, file_name="feedback_ar.mp3")
-    except Exception as e:
-        st.warning(f"Arabic TTS failed: {e}")
+        st.subheader("✅ Corrected Version (target)")
+        st.write(enriched.get("corrected", working_text))
 
-    st.success("Done. Paste a new sample whenever you’re ready.")
+        if enriched.get("alt_rewrites"):
+            with st.expander("Alternative rewrites (style variants)"):
+                for i, alt in enumerate(enriched["alt_rewrites"], 1):
+                    st.markdown(f"**Alt {i}:** {alt}")
+
+        st.subheader(f"🧭 Feedback (Fluency: {sc.get('fluency',0)}/100, Adequacy: {sc.get('adequacy',0)}/100, Fidelity: {sc.get('fidelity',0)}/100, Style: {sc.get('style',0)}/100)")
+        issues = enriched.get("issues", [])
+        if issues:
+            st.markdown("**🔎 Highlighted issues**")
+            for i, iss in enumerate(issues, 1):
+                frag = iss.get("text","")
+                st.markdown(
+                    f"**{i}. {iss.get('type','issue')} ({iss.get('severity','minor')})** — {iss.get('explanation','')}\n\n"
+                    f"Suggestion: _{iss.get('suggestion','')}_\n\n"
+                    f"Span: `{iss.get('start',0)}–{iss.get('end',0)}` → `{frag}`"
+                )
+        else:
+            st.write("No span-level issues found.")
+
+        wc = enriched.get("word_choice_notes", [])
+        if wc:
+            st.subheader("🎯 Notes & Strategy")
+            for note in wc:
+                st.write(f"- {note}")
+
+        syns = enriched.get("synonym_suggestions", {})
+        if syns:
+            st.subheader("🧩 Synonym Suggestions")
+            for w, options in syns.items():
+                st.markdown(f"- **{w}** → {', '.join(options)}")
+
+        # Risk scan (heuristic) on corrected
+        qr = quick_risk_scan(source_text, enriched.get("corrected", working_text))
+        if any([qr["numbers"], qr["dates"], qr["named_entities"], qr["negation_flip"]]):
+            st.warning(f"Risk scan — numbers missing: {qr['numbers']}, dates missing: {qr['dates']}, names missing: {qr['named_entities']}, negation flip: {qr['negation_flip']}")
+
+        # Spoken feedback (EN + AR)
+        st.subheader("🔊 Listen to Feedback")
+        fb_en = enriched.get("spoken_feedback_en") or "Good effort. Review the corrections and try again."
+        fb_ar = enriched.get("spoken_feedback_ar") or "عمل جيد. راجع التصحيحات ثم حاول مجددًا."
+        try:
+            mp3_target = tts_bytes(enriched.get("corrected", working_text), lang_code=tts_target_lang)
+            st.audio(mp3_target, format="audio/mp3")
+            st.download_button("Download corrected (target)", mp3_target, file_name="corrected_target.mp3")
+        except Exception as e:
+            st.warning(f"TTS failed on corrected text: {e}")
+        try:
+            mp3_en = tts_bytes(fb_en, lang_code="en")
+            st.audio(mp3_en, format="audio/mp3")
+            st.download_button("Download feedback (EN)", mp3_en, file_name="feedback_en.mp3")
+        except Exception as e:
+            st.warning(f"English TTS failed: {e}")
+        try:
+            mp3_ar = tts_bytes(fb_ar, lang_code="ar")
+            st.audio(mp3_ar, format="audio/mp3")
+            st.download_button("Download feedback (AR)", mp3_ar, file_name="feedback_ar.mp3")
+        except Exception as e:
+            st.warning(f"Arabic TTS failed: {e}")
+
+        # Persist submission if exercise chosen
+        if chosen and supabase_client():
+            sb.table("submissions").insert({
+                "exercise_id": chosen["id"],
+                "student_id": st.session_state.get("student_id", "anon"),
+                "answer": working_text,
+                "feedback": enriched
+            }).execute()
+            st.info("Submission saved.")
 else:
-    st.caption("Tip: This build is bidirectional. Add OPENAI_API_KEY in Secrets to unlock richer feedback.")
+    st.caption("Tip: Add OPENAI_API_KEY in Secrets to unlock richer feedback. Supabase is optional for exercises.")
+```
+
+---
+
+## requirements.txt additions
+
+```txt
+python-dateutil>=2.9
+supabase>=2.6
+```
+
+## Secrets (Streamlit Cloud → Settings → Secrets or `.streamlit/secrets.toml`)
+
+```toml
+OPENAI_API_KEY = "sk-..."          # optional, for LLM feedback
+OPENAI_MODEL = "gpt-4o"            # optional override
+LT_API_URL = "https://api.languagetoolplus.com"  # optional (premium)
+LT_API_KEY = "..."                 # optional (premium)
+SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"    # optional (instructor/student)
+SUPABASE_SERVICE_ROLE = "ey...your_service_role_key" # optional; server-side only
+```
+
+## Supabase schema (optional)
+
+```sql
+create table if not exists exercises (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  direction text check (direction in ('ar→en','en→ar')) not null,
+  source text not null,
+  level text default 'B2',
+  created_at timestamptz default now()
+);
+
+create table if not exists submissions (
+  id uuid primary key default gen_random_uuid(),
+  exercise_id uuid references exercises(id) on delete cascade,
+  student_id text,
+  answer text not null,
+  feedback jsonb,
+  created_at timestamptz default now()
+);
+```
