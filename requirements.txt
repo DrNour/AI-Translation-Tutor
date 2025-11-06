@@ -1,8 +1,10 @@
-streamlit>=1.31
+streamlit>=1.38
 openai>=1.40
-gTTS>=2.5
-language-tool-python>=2.7
+gTTS>=2.5.1
+language-tool-python>=2.7.1
 nltk>=3.9
 python-dateutil>=2.9
 supabase>=2.6
+# optional, only if you’ll process audio files locally
 pydub>=0.25
+
