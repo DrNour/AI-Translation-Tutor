@@ -1,18 +1,5 @@
-# app.py — Bidirectional Tutor (Arabic ↔ English) with sharper feedback + instructor/student mode
-
-Below is a **single, ready-to-run** `app.py` that includes:
-
-* Arabic <-> English directions
-* Stronger LLM feedback (span-level issues, severity, multiple scores)
-* Verifier pass (entities, numbers, dates, negation)
-* Rate‑limit‑safe grammar checks + fallback
-* Sidebar rubric weights + overall metric
-* Optional Instructor → Student flow (Supabase). If not configured, the app still runs for ad‑hoc texts.
-
----
-
-```python
-# Bidirectional Translation Tutor: Arabic ↔ English
+# -*- coding: utf-8 -*-
+# Bidirectional Translation Tutor - Arabic <-> English
 # Strong feedback (span-level), verifier pass, rubric weights, optional instructor/student flow.
 
 import os
@@ -52,7 +39,7 @@ try:
 except Exception:
     du = None
 
-st.set_page_config(page_title="Arabic ↔ English Translation Tutor", page_icon="🗣️", layout="wide")
+st.set_page_config(page_title="Arabic <-> English Translation Tutor", page_icon="🗣️", layout="wide")
 
 # =============================
 # Arabic helpers & resources
@@ -63,9 +50,10 @@ EN_NEG_TOKENS = {" not ", "n't", " never ", " no "}
 DIACRITICS = re.compile("[\u0617-\u061A\u064B-\u0652\u0657-\u065F\u0670\u06D6-\u06ED]")
 TATWEEL = "\u0640"
 
+# False friends (Arabic cue -> English word)
 FALSE_FRIENDS_AR_EN = {
     "فعليًا": ("actually", "Use 'actually' for emphasis/contrast, not for 'currently'. For 'currently', use 'currently/at the moment'."),
-    "حساس": ("sensitive", "'Sensitive' ≠ 'sensible'. 'Sensible' = reasonable; 'sensitive' = easily affected."),
+    "حساس": ("sensitive", "'Sensitive' is not 'sensible'. 'Sensible' = reasonable; 'sensitive' = easily affected."),
     "أخيرا": ("finally", "Use 'finally' for the end of a process, not for 'eventually' (at some point in the future)."),
 }
 
@@ -95,9 +83,9 @@ PREP_TIPS_EN = [
 ]
 
 PREP_TIPS_AR = [
-    ("في", "تُستخدم مع الزمن العام/الأماكن الواسعة: في 2020، في يوليو، في المدينة"),
-    ("على", "تُستخدم مع الأسطح/بعض التراكيب؛ ملاحظة: 'on Monday' → 'يوم الاثنين'"),
-    ("عند", "تُستخدم مع الأوقات/النقاط المحددة: عند الساعة السابعة، عند الباب"),
+    ("في", "تستخدم مع الزمن العام/الاماكن الواسعة: في 2020، في يوليو، في المدينة"),
+    ("على", "تستخدم مع الاسطح/بعض التراكيب؛ ملاحظة: on Monday -> يوم الاثنين"),
+    ("عند", "تستخدم مع الاوقات/النقاط المحددة: عند الساعة السابعة، عند الباب"),
 ]
 
 # =============================
@@ -220,7 +208,7 @@ def wordnet_synonyms_en(word: str) -> List[str]:
     return sorted(list(syns))[:10]
 
 # =============================
-# Heuristics: Arabic → English
+# Heuristics: Arabic -> English
 # =============================
 
 def heuristics_ar_to_en(ar_source: str, en_student: str) -> Tuple[List[str], Dict[str, List[str]]]:
@@ -259,7 +247,7 @@ def heuristics_ar_to_en(ar_source: str, en_student: str) -> Tuple[List[str], Dic
     return notes, synonym_suggestions
 
 # =============================
-# Heuristics: English → Arabic
+# Heuristics: English -> Arabic
 # =============================
 
 def heuristics_en_to_ar(en_source: str, ar_student: str) -> Tuple[List[str], Dict[str, List[str]]]:
@@ -354,19 +342,20 @@ def llm_feedback(student_text: str, source_text: str, mode: str) -> Dict[str, An
     }
 
     # Heuristics + LT pre-pass
-    if mode == "ar→en":
+    if mode == "ar->en":
         lt_issues = analyze_with_languagetool_en(student_text)
         notes, syns = heuristics_ar_to_en(source_text, student_text)
     else:
         lt_issues = []
         notes, syns = heuristics_en_to_ar(source_text, student_text)
 
+    # Primary LLM pass
     if has_openai():
         client = init_openai()
         if client:
-            target_lang = "English" if mode == "ar→en" else "Arabic"
+            target_lang = "English" if mode == "ar->en" else "Arabic"
             system_prompt = (
-                f"You are a meticulous Arabic↔English translation coach. Target language: {target_lang}.\n"
+                f"You are a meticulous Arabic-English translation coach. Target language: {target_lang}.\n"
                 "Return precise, span-labeled feedback. Keep corrections minimal (preserve meaning).\n"
                 "JSON only, matching this schema: " + json.dumps(SCHEMA_HINT)
             )
@@ -495,7 +484,7 @@ def supabase_client():
 # UI
 # =============================
 
-st.title("🗣️ Arabic ↔ English Translation Tutor")
+st.title("Arabic <-> English Translation Tutor")
 
 with st.sidebar:
     role = st.selectbox("Role", ["Student", "Instructor"], index=0)
@@ -508,17 +497,18 @@ with st.sidebar:
 
 mode = st.radio(
     "Direction",
-    ["Arabic → English", "English → Arabic"],
+    ["Arabic -> English", "English -> Arabic"],
     index=0,
     horizontal=True
 )
 
+# Instructor panel
 if role == "Instructor":
     st.subheader("Create exercise")
     ex_title = st.text_input("Title")
-    ex_dir = st.radio("Direction", ["ar→en","en→ar"], horizontal=True)
+    ex_dir = st.radio("Direction", ["ar->en", "en->ar"], horizontal=True)
     ex_source = st.text_area("Source text", height=140)
-    ex_level = st.selectbox("Level", ["B1","B2","C1","C2"], index=1)
+    ex_level = st.selectbox("Level", ["B1", "B2", "C1", "C2"], index=1)
     sb = supabase_client()
     if st.button("Save exercise"):
         if not sb:
@@ -537,7 +527,7 @@ if role == "Instructor":
         for r in rows:
             st.write(f"• {r['title']} ({r['direction']}, {r['level']}) — {r['id']}")
 
-# Student / ad‑hoc panel
+# Student / ad-hoc panel
 if role == "Student":
     sb = supabase_client()
     chosen = None
@@ -549,24 +539,24 @@ if role == "Student":
             if idx != -1:
                 chosen = rows[idx]
 
-    if mode == "Arabic → English" or (chosen and chosen["direction"] == "ar→en"):
-        st.markdown("Provide **Arabic** source and your **English** translation.")
+    if mode == "Arabic -> English" or (chosen and chosen["direction"] == "ar->en"):
+        st.markdown("Provide Arabic source and your English translation.")
         col1, col2 = st.columns(2)
         with col1:
-            source_text = st.text_area("النصّ العربي (Source in Arabic)", height=180, value=(chosen["source"] if chosen and chosen["direction"]=="ar→en" else ""))
+            source_text = st.text_area("النصّ العربي (Source in Arabic)", height=180, value=(chosen["source"] if chosen and chosen["direction"] == "ar->en" else ""))
         with col2:
             student_text = st.text_area("Your English translation", height=180)
         tts_target_lang = "en"
-        mode_key = "ar→en"
+        mode_key = "ar->en"
     else:
-        st.markdown("Provide **English** source and your **Arabic** translation.")
+        st.markdown("Provide English source and your Arabic translation.")
         col1, col2 = st.columns(2)
         with col1:
-            source_text = st.text_area("Source in English", height=180, value=(chosen["source"] if chosen and chosen["direction"]=="en→ar" else ""))
+            source_text = st.text_area("Source in English", height=180, value=(chosen["source"] if chosen and chosen["direction"] == "en->ar" else ""))
         with col2:
             student_text = st.text_area("ترجمتك العربية", height=180)
         tts_target_lang = "ar"
-        mode_key = "en→ar"
+        mode_key = "en->ar"
 
     st.divider()
     if st.button("Analyze & Coach"):
@@ -583,11 +573,11 @@ if role == "Student":
         # Scores & overall
         sc = enriched.get("scores", {})
         overall = (
-            sc.get("fluency",0)*w_flu + sc.get("adequacy",0)*w_ade + sc.get("fidelity",0)*w_fid + sc.get("style",0)*w_sty
-        ) / max(1, (w_flu+w_ade+w_fid+w_sty))
+            sc.get("fluency", 0) * w_flu + sc.get("adequacy", 0) * w_ade + sc.get("fidelity", 0) * w_fid + sc.get("style", 0) * w_sty
+        ) / max(1, (w_flu + w_ade + w_fid + w_sty))
         st.metric("Overall score", f"{overall:.0f}/100")
 
-        st.subheader("✅ Corrected Version (target)")
+        st.subheader("Corrected Version (target)")
         st.write(enriched.get("corrected", working_text))
 
         if enriched.get("alt_rewrites"):
@@ -595,31 +585,31 @@ if role == "Student":
                 for i, alt in enumerate(enriched["alt_rewrites"], 1):
                     st.markdown(f"**Alt {i}:** {alt}")
 
-        st.subheader(f"🧭 Feedback (Fluency: {sc.get('fluency',0)}/100, Adequacy: {sc.get('adequacy',0)}/100, Fidelity: {sc.get('fidelity',0)}/100, Style: {sc.get('style',0)}/100)")
+        st.subheader(f"Feedback (Fluency: {sc.get('fluency',0)}/100, Adequacy: {sc.get('adequacy',0)}/100, Fidelity: {sc.get('fidelity',0)}/100, Style: {sc.get('style',0)}/100)")
         issues = enriched.get("issues", [])
         if issues:
-            st.markdown("**🔎 Highlighted issues**")
+            st.markdown("Highlighted issues")
             for i, iss in enumerate(issues, 1):
-                frag = iss.get("text","")
+                frag = iss.get("text", "")
                 st.markdown(
                     f"**{i}. {iss.get('type','issue')} ({iss.get('severity','minor')})** — {iss.get('explanation','')}\n\n"
                     f"Suggestion: _{iss.get('suggestion','')}_\n\n"
-                    f"Span: `{iss.get('start',0)}–{iss.get('end',0)}` → `{frag}`"
+                    f"Span: `{iss.get('start',0)}–{iss.get('end',0)}` -> `{frag}`"
                 )
         else:
             st.write("No span-level issues found.")
 
         wc = enriched.get("word_choice_notes", [])
         if wc:
-            st.subheader("🎯 Notes & Strategy")
+            st.subheader("Notes & Strategy")
             for note in wc:
                 st.write(f"- {note}")
 
         syns = enriched.get("synonym_suggestions", {})
         if syns:
-            st.subheader("🧩 Synonym Suggestions")
+            st.subheader("Synonym Suggestions")
             for w, options in syns.items():
-                st.markdown(f"- **{w}** → {', '.join(options)}")
+                st.markdown(f"- **{w}** -> {', '.join(options)}")
 
         # Risk scan (heuristic) on corrected
         qr = quick_risk_scan(source_text, enriched.get("corrected", working_text))
@@ -627,9 +617,9 @@ if role == "Student":
             st.warning(f"Risk scan — numbers missing: {qr['numbers']}, dates missing: {qr['dates']}, names missing: {qr['named_entities']}, negation flip: {qr['negation_flip']}")
 
         # Spoken feedback (EN + AR)
-        st.subheader("🔊 Listen to Feedback")
+        st.subheader("Listen to Feedback")
         fb_en = enriched.get("spoken_feedback_en") or "Good effort. Review the corrections and try again."
-        fb_ar = enriched.get("spoken_feedback_ar") or "عمل جيد. راجع التصحيحات ثم حاول مجددًا."
+        fb_ar = enriched.get("spoken_feedback_ar") or "عمل جيد. راجع التصحيحات ثم حاول مجددا."
         try:
             mp3_target = tts_bytes(enriched.get("corrected", working_text), lang_code=tts_target_lang)
             st.audio(mp3_target, format="audio/mp3")
@@ -660,47 +650,3 @@ if role == "Student":
             st.info("Submission saved.")
 else:
     st.caption("Tip: Add OPENAI_API_KEY in Secrets to unlock richer feedback. Supabase is optional for exercises.")
-```
-
----
-
-## requirements.txt additions
-
-```txt
-python-dateutil>=2.9
-supabase>=2.6
-```
-
-## Secrets (Streamlit Cloud → Settings → Secrets or `.streamlit/secrets.toml`)
-
-```toml
-OPENAI_API_KEY = "sk-..."          # optional, for LLM feedback
-OPENAI_MODEL = "gpt-4o"            # optional override
-LT_API_URL = "https://api.languagetoolplus.com"  # optional (premium)
-LT_API_KEY = "..."                 # optional (premium)
-SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"    # optional (instructor/student)
-SUPABASE_SERVICE_ROLE = "ey...your_service_role_key" # optional; server-side only
-```
-
-## Supabase schema (optional)
-
-```sql
-create table if not exists exercises (
-  id uuid primary key default gen_random_uuid(),
-  title text not null,
-  direction text check (direction in ('ar→en','en→ar')) not null,
-  source text not null,
-  level text default 'B2',
-  created_at timestamptz default now()
-);
-
-create table if not exists submissions (
-  id uuid primary key default gen_random_uuid(),
-  exercise_id uuid references exercises(id) on delete cascade,
-  student_id text,
-  answer text not null,
-  feedback jsonb,
-  created_at timestamptz default now()
-);
-```
-
