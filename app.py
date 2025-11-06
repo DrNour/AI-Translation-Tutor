@@ -57,12 +57,87 @@ PREP_TIPS = [
     ("at", "Precise times/points: at 7 pm, at the door, at work"),
 ]
 
-# Prefer the public API to avoid Java requirement on Streamlit Cloud
+# =============================
+# LanguageTool setup (rate-limit safe)
+# =============================
+
 def get_lt_tool(lang_code: str = "en-US"):
+    """
+    Prefer the hosted Public API (works on Streamlit Cloud).
+    If LT_API_URL and/or LT_API_KEY are provided via secrets/env, use them.
+    Falls back to local server API (may require Java) if Public API fails.
+    """
+    api_url = st.secrets.get("LT_API_URL", os.getenv("LT_API_URL"))  # e.g., https://api.languagetoolplus.com
+    api_key = st.secrets.get("LT_API_KEY", os.getenv("LT_API_KEY"))  # your premium key if you have one
     try:
-        return lt.LanguageToolPublicAPI(lang_code)
+        # Public API supports api_url/api_key args
+        return lt.LanguageToolPublicAPI(lang_code, api_key=api_key, api_url=api_url)  # type: ignore
     except Exception:
-        return lt.LanguageTool(lang_code)
+        try:
+            # Fallback to default public endpoint without key
+            return lt.LanguageToolPublicAPI(lang_code)  # type: ignore
+        except Exception:
+            # Last resort: local server (usually not available on Streamlit Cloud)
+            return lt.LanguageTool(lang_code)
+
+def safe_lt_check(text: str, lang_code: str = "en-US") -> List[Any]:
+    """
+    Wraps LanguageTool check with graceful handling of rate limits/timeouts.
+    Returns [] if LT is unavailable or rate-limited so the app can continue.
+    """
+    tool = get_lt_tool(lang_code)
+    try:
+        return tool.check(text)
+    except Exception as e:
+        # Common: language_tool_python.utils.RateLimitError
+        st.warning("Grammar server is busy (rate limit). Using lightweight checks this run.")
+        return []
+
+# =============================
+# Simple local checks (fallback)
+# =============================
+
+def fallback_text_checks(text: str) -> List[Dict[str, Any]]:
+    """
+    Very lightweight English checks when LT is unavailable:
+    - repeated words (e.g., 'the the')
+    - double spaces
+    - missing end punctuation in sentences
+    """
+    issues: List[Dict[str, Any]] = []
+    # repeated words
+    for m in re.finditer(r"\b(\w+)\s+\1\b", text, flags=re.IGNORECASE):
+        issues.append({
+            "type": "fluency",
+            "message": f"Repeated word '{m.group(1)}'.",
+            "offset": m.start(),
+            "length": len(m.group(0)),
+            "replacements": [m.group(1)]
+        })
+    # double spaces
+    for m in re.finditer(r"  +", text):
+        issues.append({
+            "type": "style",
+            "message": "Multiple consecutive spaces.",
+            "offset": m.start(),
+            "length": len(m.group(0)),
+            "replacements": [" "]
+        })
+    # missing end punctuation for longer lines
+    for line in [s.strip() for s in text.split("\n") if s.strip()]:
+        if len(line.split()) >= 6 and not re.search(r"[.!?]$", line):
+            issues.append({
+                "type": "punctuation",
+                "message": "Consider ending the sentence with a period.",
+                "offset": 0,
+                "length": 0,
+                "replacements": ["."]
+            })
+    return issues
+
+# =============================
+# Utility
+# =============================
 
 def ar_normalize(s: str) -> str:
     # Remove diacritics and tatweel; unify alef and ya forms
@@ -98,12 +173,16 @@ def init_openai():
 # =============================
 
 def analyze_with_languagetool(text: str, lang_code: str = "en-US") -> List[Dict[str, Any]]:
-    tool = get_lt_tool(lang_code)
-    matches = tool.check(text)
-    issues = []
+    matches = safe_lt_check(text, lang_code)
+    issues: List[Dict[str, Any]] = []
+
+    if not matches:
+        # LT unavailable → fallback checks
+        return fallback_text_checks(text)
+
     for m in matches:
         issues.append({
-            "type": m.ruleIssueType or "grammar",
+            "type": getattr(m, "ruleIssueType", None) or "grammar",
             "message": m.message,
             "offset": m.offset,
             "length": m.errorLength,
@@ -230,17 +309,18 @@ def llm_feedback(student_text: str, source_text_ar: str) -> Dict[str, Any]:
     if not data.get("corrected"):
         data["corrected"] = student_text
         exps = []
-        for i in lt_issues[:10]:
+        for i in lt_issues[:12]:
             exps.append({
-                "type": i["type"],
+                "type": i.get("type", "issue"),
                 "original": "",
-                "suggestion": i["replacements"][0] if i["replacements"] else "",
-                "explanation": i["message"],
+                "suggestion": (i.get("replacements") or [""])[0] if isinstance(i.get("replacements"), list) else "",
+                "explanation": i.get("message", ""),
             })
         data["explanations"] = exps
+        # soft heuristic for score when LT is thin
         data["fluency_score"] = max(0, 100 - len(lt_issues)*3)
         data["spoken_feedback_en"] = (
-            "Good effort. Focus on articles (a/the), tense consistency, and prepositions. "
+            "Good effort. Watch articles (a/the), tense consistency, and prepositions. "
             "Try the synonym suggestions to avoid repetition, then read the corrected line aloud."
         )
         data["spoken_feedback_ar"] = (
@@ -290,9 +370,9 @@ st.markdown(
 
 col1, col2 = st.columns(2)
 with col1:
-    source_text_ar = st.text_area("النصّ العربي (Source in Arabic)", height=140, placeholder="ألصِق النص العربي هنا…")
+    source_text_ar = st.text_area("النصّ العربي (Source in Arabic)", height=180, placeholder="ألصِق النص العربي هنا…")
 with col2:
-    student_text_en = st.text_area("Your English translation", height=140, placeholder="Type or paste your English translation…")
+    student_text_en = st.text_area("Your English translation", height=180, placeholder="Type or paste your English translation…")
 
 st.divider()
 
