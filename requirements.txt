@@ -3,4 +3,6 @@ openai>=1.40
 gTTS>=2.5
 language-tool-python>=2.7
 nltk>=3.9
+python-dateutil>=2.9
+supabase>=2.6
 pydub>=0.25
