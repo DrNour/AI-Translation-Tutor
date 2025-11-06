@@ -1,10 +1,8 @@
-## app.py
 # Heuristics for negation transfer from Arabic (لا/لم/لن/ما/ليس) -> English (not/never/no)
 import os
 import io
 import json
 import re
-import tempfile
 from typing import Dict, List, Any
 
 import streamlit as st
@@ -59,6 +57,12 @@ PREP_TIPS = [
     ("at", "Precise times/points: at 7 pm, at the door, at work"),
 ]
 
+# Prefer the public API to avoid Java requirement on Streamlit Cloud
+def get_lt_tool(lang_code: str = "en-US"):
+    try:
+        return lt.LanguageToolPublicAPI(lang_code)
+    except Exception:
+        return lt.LanguageTool(lang_code)
 
 def ar_normalize(s: str) -> str:
     # Remove diacritics and tatweel; unify alef and ya forms
@@ -76,7 +80,6 @@ def has_openai() -> bool:
     key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     return bool(key)
 
-
 def init_openai():
     if not has_openai():
         return None
@@ -85,16 +88,17 @@ def init_openai():
         client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY")))
         return client
     except Exception:
-        openai.api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
-        return "legacy"
-
+        if openai:
+            openai.api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+            return "legacy"
+        return None
 
 # =============================
 # Core analysis
 # =============================
 
 def analyze_with_languagetool(text: str, lang_code: str = "en-US") -> List[Dict[str, Any]]:
-    tool = lt.LanguageTool(lang_code)
+    tool = get_lt_tool(lang_code)
     matches = tool.check(text)
     issues = []
     for m in matches:
@@ -107,7 +111,6 @@ def analyze_with_languagetool(text: str, lang_code: str = "en-US") -> List[Dict[
         })
     return issues
 
-
 def wordnet_synonyms(word: str) -> List[str]:
     syns = set()
     for synset in wn.synsets(word, lang="eng"):
@@ -117,7 +120,6 @@ def wordnet_synonyms(word: str) -> List[str]:
                 syns.add(w)
     out = sorted(list(syns))
     return out[:10]
-
 
 def ar_en_heuristics(ar_source: str, en_student: str) -> Dict[str, Any]:
     """Lightweight checks tailored for Arabic→English."""
@@ -132,8 +134,6 @@ def ar_en_heuristics(ar_source: str, en_student: str) -> Dict[str, Any]:
 
     # Definite article heuristic: Arabic definite ‘ال’ often maps to ‘the’
     if re.search(r"\bال\w+", ar_norm):
-        # If there is a specific singular noun in English without article;
-        # heuristic: common nouns preceded by nothing when not plural or proper
         if re.search(r"\b(the)\b", en_low) is None:
             notes.append("Arabic definite ‘ال’ may require ‘the’ in English; check article use.")
 
@@ -150,7 +150,7 @@ def ar_en_heuristics(ar_source: str, en_student: str) -> Dict[str, Any]:
 
     # Overuse flags → synonym nudges
     synonym_suggestions = {}
-    tokens = re.findall(r"[a-zA-Z']+", en_student)
+    tokens = re.findall(r"[a-zA-Z']+", en_student or "")
     counts = {}
     for t in tokens:
         wl = t.lower()
@@ -163,7 +163,6 @@ def ar_en_heuristics(ar_source: str, en_student: str) -> Dict[str, Any]:
                 synonym_suggestions[w] = merged
 
     return {"notes": notes, "synonyms": synonym_suggestions}
-
 
 def llm_feedback(student_text: str, source_text_ar: str) -> Dict[str, Any]:
     """LLM-enhanced feedback tailored to Arabic→English when API is available."""
@@ -181,45 +180,51 @@ def llm_feedback(student_text: str, source_text_ar: str) -> Dict[str, Any]:
 
     if has_openai():
         client = init_openai()
-        system_prompt = (
-            "You are a bilingual Arabic→English translation tutor. "
-            "Compare the student's English translation to the Arabic source. "
-            "Return concise, practical feedback suitable for classroom use."
-        )
-        user_payload = {
-            "source_language": "Arabic",
-            "target_language": "English",
-            "source_text_ar": source_text_ar,
-            "student_translation_en": student_text,
-            "focus": ["grammar", "syntax", "fluency", "word choice", "faithfulness"],
-            "style": "brief and constructive",
-        }
-        try:
-            if client == "legacy":
-                resp = openai.chat.completions.create(
-                    model="gpt-4o-mini",
-                    temperature=0.3,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
-                    ],
-                    response_format={"type": "json_object"}
-                )
-                raw = resp.choices[0].message.content
-            else:
-                resp = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    temperature=0.3,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
-                    ],
-                    response_format={"type": "json_object"}
-                )
-                raw = resp.choices[0].message.content
-            data = json.loads(raw)
-        except Exception as e:
-            st.warning(f"LLM feedback unavailable, using rule-based checks only. ({e})")
+        if client:
+            system_prompt = (
+                "You are a bilingual Arabic→English translation tutor. "
+                "Compare the student's English translation to the Arabic source. "
+                "Return concise, practical feedback suitable for classroom use. "
+                "Return JSON with keys: corrected, explanations[{type,original,suggestion,explanation}], "
+                "fluency_score(0-100), word_choice_notes[], synonym_suggestions{word:[...]}, "
+                "spoken_feedback_en, spoken_feedback_ar."
+            )
+            user_payload = {
+                "source_language": "Arabic",
+                "target_language": "English",
+                "source_text_ar": source_text_ar,
+                "student_translation_en": student_text,
+                "focus": ["grammar", "syntax", "fluency", "word choice", "faithfulness"],
+                "style": "brief and constructive",
+            }
+            try:
+                if client == "legacy":
+                    resp = openai.chat.completions.create(
+                        model="gpt-4o-mini",
+                        temperature=0.3,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
+                        ],
+                        response_format={"type": "json_object"}
+                    )
+                    raw = resp.choices[0].message.content
+                else:
+                    resp = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        temperature=0.3,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
+                        ],
+                        response_format={"type": "json_object"}
+                    )
+                    raw = resp.choices[0].message.content
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    data.update(parsed)
+            except Exception as e:
+                st.warning(f"LLM feedback unavailable, using rule-based checks only. ({e})")
 
     # Fallback/populate if missing
     if not data.get("corrected"):
@@ -260,7 +265,6 @@ def llm_feedback(student_text: str, source_text_ar: str) -> Dict[str, Any]:
 
     return data
 
-
 # =============================
 # TTS
 # =============================
@@ -271,7 +275,6 @@ def tts_bytes(text: str, lang_code: str = "en") -> bytes:
     tts.write_to_fp(fp)
     fp.seek(0)
     return fp.read()
-
 
 # =============================
 # UI
@@ -300,14 +303,15 @@ if st.button("Analyze & Coach"):
         st.warning("Please paste the Arabic source text.")
         st.stop()
 
-    # We keep this version text-only to avoid Whisper dependency. If you want STT, wire it similarly to the earlier version.
+    # This build uses text input for analysis.
+    # If you want STT, wire Whisper using your OPENAI_API_KEY.
     working_text = (student_text_en or "").strip()
     if not working_text and rec is None:
         st.warning("Paste text or record audio for your translation.")
         st.stop()
 
     if rec is not None and not working_text:
-        st.info("Audio was provided but STT is not enabled in this tailored build. Paste text, or add your OpenAI key and wire Whisper if needed.")
+        st.info("Audio was provided but STT is not enabled in this build. Paste text, or add your OpenAI key and wire Whisper if needed.")
 
     # Main feedback
     enriched = llm_feedback(working_text, source_text_ar)
@@ -368,20 +372,3 @@ if st.button("Analyze & Coach"):
     st.success("Done. Paste new text whenever you’re ready.")
 else:
     st.caption("Tip: This build focuses on Arabic→English. To enable speech-to-text, add OPENAI_API_KEY in Secrets and wire Whisper.")
-```
-
----
-
-## README additions (snippet)
-
-```md
-### Arabic → English tailoring
-- Heuristics for negation transfer from Arabic (لا/لم/لن/ما/ليس) → English (not/never/no)
-- Article hints when Arabic uses the definite article "ال"
-- Preposition reminders (in/on/at)
-- False-friend guardrails (actually/currently, sensitive/sensible, finally/eventually)
-- Curated synonym prompts for overused English words (good, very, important, make, do, …)
-
-**Speech-to-text**: to add audio transcription, put `OPENAI_API_KEY` in Streamlit Secrets and connect Whisper as in the earlier generic template.
-```
-
