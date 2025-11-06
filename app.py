@@ -1,6 +1,5 @@
 ## app.py
-
-```python
+# Heuristics for negation transfer from Arabic (لا/لم/لن/ما/ليس) -> English (not/never/no)
 import os
 import io
 import json
@@ -385,3 +384,4 @@ else:
 
 **Speech-to-text**: to add audio transcription, put `OPENAI_API_KEY` in Streamlit Secrets and connect Whisper as in the earlier generic template.
 ```
+
