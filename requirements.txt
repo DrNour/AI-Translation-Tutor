@@ -1,0 +1,6 @@
+streamlit>=1.31
+openai>=1.40
+gTTS>=2.5
+language-tool-python>=2.7
+nltk>=3.9
+pydub>=0.25
