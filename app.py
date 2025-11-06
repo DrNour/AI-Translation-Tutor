@@ -2,7 +2,7 @@
 
 Below is a **single, ready-to-run** `app.py` that includes:
 
-* Arabic ↔ English directions
+* Arabic <-> English directions
 * Stronger LLM feedback (span-level issues, severity, multiple scores)
 * Verifier pass (entities, numbers, dates, negation)
 * Rate‑limit‑safe grammar checks + fallback
@@ -703,3 +703,4 @@ create table if not exists submissions (
   created_at timestamptz default now()
 );
 ```
+
